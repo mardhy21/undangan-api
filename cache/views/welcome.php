@@ -8,7 +8,7 @@
     <meta name="description" content="Kamu - PHP Framework">
     <meta name="theme-color" content="#ffffff">
     <meta name="color-scheme" content="light">
-    <title>Kamu - PHP Framework</title>
+    <title>Kamu 2- PHP Framework</title>
     <link rel="stylesheet" href="<?php echo e(asset('css/app.css')) ?>">
     <link rel="icon" type="image/png" sizes="192x192" href="<?php echo e(asset('kamu.png')) ?>">
 </head>

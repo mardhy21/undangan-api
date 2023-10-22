@@ -5,10 +5,12 @@ namespace App\Controllers;
 use App\Models\Comment;
 use App\Models\Like;
 use App\Response\JsonResponse;
+use Core\Database\DB;
 use Core\Routing\Controller;
 use Core\Http\Request;
 use Core\Valid\Validator;
 use Ramsey\Uuid\Uuid;
+use Throwable;
 
 class CommentController extends Controller
 {
@@ -22,27 +24,22 @@ class CommentController extends Controller
     public function get(Request $request): JsonResponse
     {
         $valid = $this->validate($request, [
-            'next' => ['max:5'],
-            'per' => ['max:3']
+            'next' => ['nullable', 'int'],
+            'per' => ['required', 'int', 'max:50']
         ]);
 
         if ($valid->fails()) {
             return $this->json->error($valid->messages(), 400);
         }
 
-        $valid->next = intval($valid->next);
-        $valid->per = intval($valid->per);
-
-        $data = $request->get('key') === env('JWT_KEY')
-            ? Comment::orderBy('id', 'DESC')
-            : Comment::with('comments')
+        $data = Comment::with('comments')
             ->select(['uuid', 'nama', 'hadir', 'komentar', 'created_at'])
             ->where('user_id', context()->user->id)
             ->whereNull('parent_id')
             ->orderBy('id', 'DESC');
 
-        if ($valid->next >= 0 && $valid->per > 0) {
-            $data = $data->limit($valid->per)->offset($valid->next);
+        if ($valid->per > 0 && ($valid->next ?? 0) >= 0) {
+            $data = $data->limit($valid->per)->offset($valid->next ?? 0);
         }
 
         return $this->json->success($data->get(), 200);
@@ -95,7 +92,6 @@ class CommentController extends Controller
         $data = Comment::where('uuid', $valid->id)
             ->where('user_id', context()->user->id)
             ->limit(1)
-            ->select('uuid')
             ->first()
             ->exist();
 
@@ -105,7 +101,8 @@ class CommentController extends Controller
 
         $like = Like::create([
             'uuid' => Uuid::uuid4()->toString(),
-            'comment_id' => $data->uuid
+            'comment_id' => $data->uuid,
+            'user_id' => context()->user->id
         ]);
 
         return $this->json->success($like->only('uuid'), 201);
@@ -127,7 +124,7 @@ class CommentController extends Controller
         }
 
         $data = Like::where('uuid', $valid->id)
-            ->select('id')
+            ->where('user_id', context()->user->id)
             ->limit(1)
             ->first()
             ->exist();
@@ -136,20 +133,18 @@ class CommentController extends Controller
             return $this->json->error(['not found'], 404);
         }
 
-        $status = $data->destroy() == 1;
+        $status = $data->destroy();
 
-        if ($status) {
+        if ($status == 1) {
             return $this->json->success([
-                'status' => $status
+                'status' => true
             ], 200);
         }
 
-        return $this->json->error([
-            ['server error']
-        ], 500);
+        return $this->json->error(['server error'], 500);
     }
 
-    public function destroy(string $id, Request $request): JsonResponse
+    public function destroy(string $id): JsonResponse
     {
         $valid = Validator::make(
             [
@@ -164,9 +159,7 @@ class CommentController extends Controller
             return $this->json->error($valid->messages(), 400);
         }
 
-        $data = ($request->get('id') === env('JWT_KEY')
-            ? Comment::where('uuid', $id)
-            : Comment::where('own', $id))
+        $data = Comment::where('own', $valid->id)
             ->where('user_id', context()->user->id)
             ->limit(1)
             ->first()
@@ -176,30 +169,35 @@ class CommentController extends Controller
             return $this->json->error(['not found'], 404);
         }
 
-        if ($request->get('id') !== env('JWT_KEY')) {
+        try {
+            DB::beginTransaction();
+
             Like::where('comment_id', $data->uuid)->delete();
             Comment::where('parent_id', $data->uuid)->delete();
+
+            DB::commit();
+        } catch (Throwable) {
+            DB::rollBack();
+            return $this->json->error(['server error'], 500);
         }
 
-        $status = $data->destroy() == 1;
+        $status = $data->destroy();
 
-        if ($status) {
+        if ($status == 1) {
             return $this->json->success([
-                'status' => $status
+                'status' => true
             ], 200);
         }
 
-        return $this->json->error([
-            ['server error']
-        ], 500);
+        return $this->json->error(['server error'], 500);
     }
 
     public function update(string $id, Request $request): JsonResponse
     {
         $valid = Validator::make(
             [
-                ...$request->only(['hadir', 'komentar']),
-                'id' => $id
+                'id' => $id,
+                ...$request->only(['hadir', 'komentar'])
             ],
             [
                 'id' => ['required', 'str', 'trim', 'uuid', 'max:37'],
@@ -223,19 +221,15 @@ class CommentController extends Controller
             return $this->json->error(['not found'], 404);
         }
 
-        $data->hadir = $valid->hadir;
-        $data->komentar = $valid->komentar;
-        $status = $data->save() == 1;
+        $status = $data->fill($valid->only(['hadir', 'komentar']))->save();
 
-        if ($status) {
+        if ($status == 1) {
             return $this->json->success([
-                'status' => $status
+                'status' => true
             ], 200);
         }
 
-        return $this->json->error([
-            ['server error']
-        ], 500);
+        return $this->json->error(['server error'], 500);
     }
 
     public function create(Request $request): JsonResponse
@@ -243,16 +237,16 @@ class CommentController extends Controller
         $valid = Validator::make(
             [
                 ...$request->only(['id', 'nama', 'hadir', 'komentar']),
-                'ip' => $request->ip(),
+                'ip' => env('HTTP_CF_CONNECTING_IP') ? $request->server->get('HTTP_CF_CONNECTING_IP') : $request->ip(),
                 'user_agent' => $request->server->get('HTTP_USER_AGENT')
             ],
             [
                 'id' => ['nullable', 'str', 'trim', 'uuid', 'max:37'],
-                'nama' => ['required', 'str', 'max:50'],
+                'nama' => ['required', 'str', 'trim', 'max:50'],
                 'hadir' => ['bool'],
                 'komentar' => ['required', 'str', 'max:500'],
-                'user_agent' => ['str', 'trim', 'max:500'],
-                'ip' => ['str', 'trim', 'max:50']
+                'ip' => ['nullable', 'str', 'trim', 'max:50'],
+                'user_agent' => ['nullable', 'str', 'trim', 'max:500']
             ]
         );
 
@@ -266,8 +260,10 @@ class CommentController extends Controller
         $data['own'] = Uuid::uuid4()->toString();
         $data['user_id'] = context()->user->id;
 
+        $comment = Comment::create($data);
+
         return $this->json->success(
-            Comment::create($data)->only(['nama', 'hadir', 'komentar', 'uuid', 'own', 'created_at']),
+            $comment->only(['nama', 'hadir', 'komentar', 'uuid', 'own', 'created_at']),
             201
         );
     }
